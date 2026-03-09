@@ -22,3 +22,6 @@ ENV VIRTUAL_ENV="/app/.venv"
 ENV OMP_NUM_THREADS=1
 ENV NANOCHAT_BASE_DIR=/data/nanochat
 ENV WANDB_RUN=dummy
+
+COPY entrypoint.sh /app/entrypoint.sh
+ENTRYPOINT ["/app/entrypoint.sh"]

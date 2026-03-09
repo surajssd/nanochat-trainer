@@ -1,0 +1,48 @@
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: nanochat-04-base-eval
+  namespace: nanochat
+spec:
+  backoffLimit: 2
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+      - name: nanochat
+        image: quay.io/surajd/nanochat:latest
+        args: ["base-eval"]
+        env:
+        - name: NUM_GPUS
+          value: "8"
+        - name: DEVICE_BATCH_SIZE
+          value: "16"
+        - name: PYTORCH_CUDA_ALLOC_CONF
+          value: "expandable_segments:True"
+        - name: NCCL_IB_DISABLE
+          value: "0"
+        resources:
+          limits:
+            nvidia.com/gpu: 8
+            memory: "256Gi"
+            cpu: "64"
+          requests:
+            nvidia.com/gpu: 8
+            memory: "128Gi"
+            cpu: "32"
+        volumeMounts:
+        - name: nanochat-data
+          mountPath: /data/nanochat
+        - name: dshm
+          mountPath: /dev/shm
+      volumes:
+      - name: nanochat-data
+        persistentVolumeClaim:
+          claimName: nanochat-data
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: "64Gi"
+      nodeSelector:
+        node.kubernetes.io/instance-type: Standard_ND96isr_H100_v5
