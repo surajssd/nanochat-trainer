@@ -2,11 +2,12 @@
 
 Infrastructure and packaging for running [Karpathy's nanochat](https://github.com/karpathy/nanochat) LLM training pipeline on Kubernetes with GPUs.
 
-This repo does **not** contain ML training code. It provides a GPU-ready container image, a phased entrypoint script, Kubernetes manifests, and a pipeline runner that orchestrates the full training workflow end-to-end.
+This repo does **not** contain ML training code. It provides a GPU-ready container image, a phased entrypoint script, Kubernetes manifests, and an [Argo Workflow](https://argoproj.github.io/workflows/) that orchestrates the full training pipeline end-to-end.
 
 ## Prerequisites
 
 - A Kubernetes cluster with GPU nodes (tested on Azure `Standard_ND96isr_H100_v5` with 8x H100)
+- [Argo Workflows](https://argoproj.github.io/workflows/quick-start/) installed on the cluster
 - `kubectl` configured and pointing at your cluster
 - `docker` (with `buildx`) for building images
 - `gh` CLI (GitHub CLI) for resolving the latest upstream nanochat commit
@@ -21,19 +22,33 @@ make push
 
 This clones the latest upstream nanochat, installs dependencies with `uv`, and pushes a tagged image to `quay.io/surajd/nanochat`.
 
-### 2. Run the full pipeline
+### 2. Create the namespace and PVC
 
 ```bash
-./run-pipeline.sh
+kubectl apply -f k8s/single-node/pvc.yaml
 ```
 
-That's it. The script creates the namespace and PVC, then runs all 8 phases sequentially, waiting for each to complete before starting the next.
-
-### 3. Chat with your model
-
-After the pipeline finishes, port-forward the chat UI to your machine:
+### 3. Run the training pipeline
 
 ```bash
+kubectl create -f k8s/single-node/workflow.yaml
+```
+
+This submits the Argo Workflow which runs all 7 training phases sequentially (dataset → tokenizer → base-train → base-eval → sft → chat-eval → report), waiting for each to complete before starting the next.
+
+Monitor progress:
+
+```bash
+kubectl get workflow -n nanochat
+kubectl describe workflow -n nanochat -l workflows.argoproj.io/workflow
+```
+
+### 4. Chat with your model
+
+After the workflow completes, deploy the chat UI and port-forward:
+
+```bash
+kubectl apply -f k8s/single-node/chat-serve.yaml
 kubectl port-forward -n nanochat deployment/nanochat-08-chat-serve 8000:8000
 ```
 
@@ -41,7 +56,7 @@ Then open [http://localhost:8000](http://localhost:8000) in your browser.
 
 ## Pipeline Phases
 
-The training pipeline consists of 8 phases. Phases 1-7 run as Kubernetes Jobs; phase 8 runs as a long-lived Deployment.
+The training pipeline consists of 7 phases defined as sequential steps in an Argo Workflow. Each phase creates a Kubernetes Job with `generateName` for clean re-runs.
 
 | # | Phase | Description | GPUs | Timeout |
 |---|-------|-------------|------|---------|
@@ -52,40 +67,45 @@ The training pipeline consists of 8 phases. Phases 1-7 run as Kubernetes Jobs; p
 | 5 | `sft` | Supervised fine-tuning on chat data | 8 | 2h |
 | 6 | `chat-eval` | Evaluate chat model (ChatCORE) | 8 | 1h |
 | 7 | `report` | Generate final report | 0 | 10m |
-| 8 | `chat-serve` | Serve interactive chat web UI | 1 | 5m |
 
-All phases share a 256Gi PersistentVolumeClaim (`nanochat-data`) mounted at `/data/nanochat`, so checkpoints, datasets, and model artifacts persist across phases and restarts.
+The chat-serve Deployment (phase 8) is a standalone manifest applied separately after the workflow completes — it's a long-lived interactive application, not a training phase.
 
-## Pipeline Runner
+All phases share a 256Gi PersistentVolumeClaim (`nanochat-data1`) mounted at `/data/nanochat`, so checkpoints, datasets, and model artifacts persist across phases and restarts.
 
-`run-pipeline.sh` orchestrates the phases on your Kubernetes cluster.
+## Argo Workflow Usage
+
+### Submit and monitor
 
 ```bash
-# Run the full pipeline
-./run-pipeline.sh
+# Submit the workflow
+kubectl create -f k8s/single-node/workflow.yaml
 
-# Resume from a specific phase (skips earlier phases)
-./run-pipeline.sh -s base-train
+# List workflows
+kubectl get workflows -n nanochat
 
-# Run a single phase
-./run-pipeline.sh -o sft
+# Watch workflow progress
+kubectl get workflows -n nanochat -w
 
-# Dry-run: see what would happen without applying anything
-./run-pipeline.sh -n
+# Get detailed workflow status
+kubectl describe workflow -n nanochat <workflow-name>
 
-# Tail pod logs live while waiting
-./run-pipeline.sh -l -s sft
+# View logs for a specific phase's job
+kubectl get jobs -n nanochat
+kubectl logs -n nanochat job/<job-name>
 ```
 
-### Options
+### Retry and re-run
 
-| Flag | Description |
-|------|-------------|
-| `-s, --start PHASE` | Start from PHASE, skipping earlier phases |
-| `-o, --only PHASE` | Run a single phase and exit |
-| `-n, --dry-run` | Print the plan without applying anything |
-| `-l, --logs` | Tail pod logs while waiting for completion |
-| `-h, --help` | Show help message |
+```bash
+# Re-submit a fresh run (generateName creates a new workflow each time)
+kubectl create -f k8s/single-node/workflow.yaml
+
+# Delete a workflow and its child resources (owner references clean up jobs automatically)
+kubectl delete workflow -n nanochat <workflow-name>
+
+# Delete all workflows
+kubectl delete workflows -n nanochat --all
+```
 
 ## Building the Container Image
 
@@ -111,7 +131,7 @@ make push PLATFORM=linux/arm64
 
 ## Configuration
 
-All training parameters are configured via environment variables, set in the Kubernetes manifests.
+All training parameters are configured via environment variables, set in the workflow manifest.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -132,57 +152,50 @@ All manifests live in `k8s/single-node/`:
 | File | Kind | Description |
 |------|------|-------------|
 | `pvc.yaml` | Namespace + PVC | Creates `nanochat` namespace and 256Gi PVC |
-| `01-dataset.yaml` | Job | Downloads training data |
-| `02-tokenizer.yaml` | Job | Trains BPE tokenizer |
-| `03-base-train.yaml` | Job | Pretrains the base model |
-| `04-base-eval.yaml` | Job | Evaluates the base model |
-| `05-sft.yaml` | Job | Supervised fine-tuning |
-| `06-chat-eval.yaml` | Job | Evaluates the chat model |
-| `07-report.yaml` | Job | Generates final report |
-| `08-chat-serve.yaml` | Deployment | Serves the chat web UI on port 8000 |
+| `workflow.yaml` | Argo Workflow | Full training pipeline (7 phases as sequential steps) |
+| `chat-serve.yaml` | Deployment | Serves the chat web UI on port 8000 (deployed separately) |
 
 The chat-serve Deployment includes readiness and liveness probes on the `/health` endpoint to ensure the model is fully loaded before accepting traffic.
 
-### Running Individual Phases Manually
-
-You can apply any manifest directly:
-
-```bash
-# Apply namespace and PVC first
-kubectl apply -f k8s/single-node/pvc.yaml
-
-# Run a specific phase
-kubectl apply -f k8s/single-node/05-sft.yaml
-
-# Watch it
-kubectl logs -n nanochat job/nanochat-05-sft -f
-
-# Or deploy the chat UI
-kubectl apply -f k8s/single-node/08-chat-serve.yaml
-kubectl port-forward -n nanochat deployment/nanochat-08-chat-serve 8000:8000
-```
-
 ## Troubleshooting
 
-### Check phase status
+### Check workflow status
 
 ```bash
-# List all jobs
+# List all workflows
+kubectl get workflows -n nanochat
+
+# Get detailed workflow status
+kubectl describe workflow -n nanochat <workflow-name>
+
+# List child jobs created by the workflow
 kubectl get jobs -n nanochat
 
-# Check the chat-serve deployment
+# View logs for a specific phase's job
+kubectl logs -n nanochat job/<job-name>
+```
+
+### Retry a failed phase
+
+```bash
+# Delete the failed workflow (owner references clean up child jobs)
+kubectl delete workflow -n nanochat <workflow-name>
+
+# Re-submit a fresh run
+kubectl create -f k8s/single-node/workflow.yaml
+```
+
+### Check the chat-serve deployment
+
+```bash
 kubectl get deployment -n nanochat
-
-# Describe a failing job
-kubectl describe job -n nanochat nanochat-03-base-train
-
-# View logs
-kubectl logs -n nanochat job/nanochat-03-base-train
+kubectl describe deployment -n nanochat nanochat-08-chat-serve
+kubectl logs -n nanochat deployment/nanochat-08-chat-serve
 ```
 
 ### Base training auto-resume
 
-The `base-train` phase automatically detects existing checkpoints in `$NANOCHAT_BASE_DIR/base_checkpoints/d${DEPTH}/` and resumes from the latest one. If the job is interrupted, simply re-run it and training picks up where it left off.
+The `base-train` phase automatically detects existing checkpoints in `$NANOCHAT_BASE_DIR/base_checkpoints/d${DEPTH}/` and resumes from the latest one. If the job is interrupted, simply re-run the workflow and training picks up where it left off.
 
 ### Storage
 
@@ -195,18 +208,11 @@ nanochat-trainer/
 ├── Dockerfile              # GPU container image build
 ├── Makefile                # Build/push automation
 ├── entrypoint.sh           # Phased training entrypoint
-├── run-pipeline.sh         # K8s pipeline orchestrator
 ├── k8s/
 │   └── single-node/
 │       ├── pvc.yaml            # Namespace + PVC
-│       ├── 01-dataset.yaml     # Dataset download
-│       ├── 02-tokenizer.yaml   # Tokenizer training
-│       ├── 03-base-train.yaml  # Base model pretraining
-│       ├── 04-base-eval.yaml   # Base model evaluation
-│       ├── 05-sft.yaml         # Supervised fine-tuning
-│       ├── 06-chat-eval.yaml   # Chat model evaluation
-│       ├── 07-report.yaml      # Report generation
-│       └── 08-chat-serve.yaml  # Chat web UI deployment
+│       ├── workflow.yaml       # Argo Workflow (full training pipeline)
+│       └── chat-serve.yaml  # Chat web UI deployment
 ├── CLAUDE.md               # Claude Code project instructions
 ├── LICENSE                 # MIT
 └── README.md               # This file

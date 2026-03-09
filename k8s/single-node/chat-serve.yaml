@@ -51,14 +51,14 @@ spec:
             memory: "32Gi"
             cpu: "8"
         volumeMounts:
-        - name: nanochat-data
+        - name: nanochat-data1
           mountPath: /data/nanochat
         - name: dshm
           mountPath: /dev/shm
       volumes:
-      - name: nanochat-data
+      - name: nanochat-data1
         persistentVolumeClaim:
-          claimName: nanochat-data
+          claimName: nanochat-data1
       - name: dshm
         emptyDir:
           medium: Memory

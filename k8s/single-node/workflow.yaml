@@ -1,0 +1,399 @@
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  generateName: nanochat-pipeline-
+  namespace: nanochat
+spec:
+  entrypoint: nanochat-pipeline
+  serviceAccountName: argo-workflow
+  activeDeadlineSeconds: 36000 # 10h overall timeout
+  templates:
+    # ------------------------------------------------------------------
+    # Entrypoint: run all training phases sequentially
+    # ------------------------------------------------------------------
+    - name: nanochat-pipeline
+      steps:
+        - - name: dataset
+            template: dataset
+        - - name: tokenizer
+            template: tokenizer
+        - - name: base-train
+            template: base-train
+        - - name: base-eval
+            template: base-eval
+        - - name: sft
+            template: sft
+        - - name: chat-eval
+            template: chat-eval
+        - - name: report
+            template: report
+
+    # ------------------------------------------------------------------
+    # Phase 1: Download training dataset
+    # ------------------------------------------------------------------
+    - name: dataset
+      resource:
+        action: create
+        setOwnerReference: true
+        successCondition: status.succeeded > 0
+        failureCondition: status.failed > 2
+        manifest: |
+          apiVersion: batch/v1
+          kind: Job
+          metadata:
+            generateName: nanochat-data1set-
+            namespace: nanochat
+          spec:
+            backoffLimit: 2
+            activeDeadlineSeconds: 3600
+            template:
+              spec:
+                restartPolicy: OnFailure
+                containers:
+                - name: nanochat
+                  image: quay.io/surajd/nanochat:latest
+                  args: ["dataset"]
+                  env:
+                  - name: DATASET_SHARDS
+                    value: "170"
+                  resources:
+                    limits:
+                      memory: "16Gi"
+                      cpu: "8"
+                    requests:
+                      memory: "8Gi"
+                      cpu: "4"
+                  volumeMounts:
+                  - name: nanochat-data1
+                    mountPath: /data/nanochat
+                volumes:
+                - name: nanochat-data1
+                  persistentVolumeClaim:
+                    claimName: nanochat-data1
+                nodeSelector:
+                  node.kubernetes.io/instance-type: Standard_ND96isr_H100_v5
+
+    # ------------------------------------------------------------------
+    # Phase 2: Train and evaluate BPE tokenizer
+    # ------------------------------------------------------------------
+    - name: tokenizer
+      resource:
+        action: create
+        setOwnerReference: true
+        successCondition: status.succeeded > 0
+        failureCondition: status.failed > 2
+        manifest: |
+          apiVersion: batch/v1
+          kind: Job
+          metadata:
+            generateName: nanochat-tokenizer-
+            namespace: nanochat
+          spec:
+            backoffLimit: 2
+            activeDeadlineSeconds: 1800
+            template:
+              spec:
+                restartPolicy: OnFailure
+                containers:
+                - name: nanochat
+                  image: quay.io/surajd/nanochat:latest
+                  args: ["tokenizer"]
+                  resources:
+                    limits:
+                      memory: "32Gi"
+                      cpu: "16"
+                    requests:
+                      memory: "16Gi"
+                      cpu: "8"
+                  volumeMounts:
+                  - name: nanochat-data1
+                    mountPath: /data/nanochat
+                volumes:
+                - name: nanochat-data1
+                  persistentVolumeClaim:
+                    claimName: nanochat-data1
+                nodeSelector:
+                  node.kubernetes.io/instance-type: Standard_ND96isr_H100_v5
+
+    # ------------------------------------------------------------------
+    # Phase 3: Pretrain base model (auto-resumes from checkpoints)
+    # ------------------------------------------------------------------
+    - name: base-train
+      resource:
+        action: create
+        setOwnerReference: true
+        successCondition: status.succeeded > 0
+        failureCondition: status.failed > 4
+        manifest: |
+          apiVersion: batch/v1
+          kind: Job
+          metadata:
+            generateName: nanochat-base-train-
+            namespace: nanochat
+          spec:
+            backoffLimit: 4
+            activeDeadlineSeconds: 14400
+            template:
+              spec:
+                restartPolicy: OnFailure
+                containers:
+                - name: nanochat
+                  image: quay.io/surajd/nanochat:latest
+                  args: ["base-train"]
+                  env:
+                  - name: DEPTH
+                    value: "24"
+                  - name: DEVICE_BATCH_SIZE
+                    value: "16"
+                  - name: NUM_GPUS
+                    value: "8"
+                  - name: SAVE_EVERY
+                    value: "500"
+                  - name: TARGET_PARAM_DATA_RATIO
+                    value: "9.5"
+                  - name: PYTORCH_CUDA_ALLOC_CONF
+                    value: "expandable_segments:True"
+                  - name: NCCL_IB_DISABLE
+                    value: "0"
+                  resources:
+                    limits:
+                      nvidia.com/gpu: 8
+                      memory: "256Gi"
+                      cpu: "64"
+                    requests:
+                      nvidia.com/gpu: 8
+                      memory: "128Gi"
+                      cpu: "32"
+                  volumeMounts:
+                  - name: nanochat-data1
+                    mountPath: /data/nanochat
+                  - name: dshm
+                    mountPath: /dev/shm
+                volumes:
+                - name: nanochat-data1
+                  persistentVolumeClaim:
+                    claimName: nanochat-data1
+                - name: dshm
+                  emptyDir:
+                    medium: Memory
+                    sizeLimit: "64Gi"
+                nodeSelector:
+                  node.kubernetes.io/instance-type: Standard_ND96isr_H100_v5
+
+    # ------------------------------------------------------------------
+    # Phase 4: Evaluate base model (CORE/BPB benchmarks)
+    # ------------------------------------------------------------------
+    - name: base-eval
+      resource:
+        action: create
+        setOwnerReference: true
+        successCondition: status.succeeded > 0
+        failureCondition: status.failed > 2
+        manifest: |
+          apiVersion: batch/v1
+          kind: Job
+          metadata:
+            generateName: nanochat-base-eval-
+            namespace: nanochat
+          spec:
+            backoffLimit: 2
+            activeDeadlineSeconds: 3600
+            template:
+              spec:
+                restartPolicy: OnFailure
+                containers:
+                - name: nanochat
+                  image: quay.io/surajd/nanochat:latest
+                  args: ["base-eval"]
+                  env:
+                  - name: NUM_GPUS
+                    value: "8"
+                  - name: DEVICE_BATCH_SIZE
+                    value: "16"
+                  - name: PYTORCH_CUDA_ALLOC_CONF
+                    value: "expandable_segments:True"
+                  - name: NCCL_IB_DISABLE
+                    value: "0"
+                  resources:
+                    limits:
+                      nvidia.com/gpu: 8
+                      memory: "256Gi"
+                      cpu: "64"
+                    requests:
+                      nvidia.com/gpu: 8
+                      memory: "128Gi"
+                      cpu: "32"
+                  volumeMounts:
+                  - name: nanochat-data1
+                    mountPath: /data/nanochat
+                  - name: dshm
+                    mountPath: /dev/shm
+                volumes:
+                - name: nanochat-data1
+                  persistentVolumeClaim:
+                    claimName: nanochat-data1
+                - name: dshm
+                  emptyDir:
+                    medium: Memory
+                    sizeLimit: "64Gi"
+                nodeSelector:
+                  node.kubernetes.io/instance-type: Standard_ND96isr_H100_v5
+
+    # ------------------------------------------------------------------
+    # Phase 5: Supervised fine-tuning on chat data
+    # ------------------------------------------------------------------
+    - name: sft
+      resource:
+        action: create
+        setOwnerReference: true
+        successCondition: status.succeeded > 0
+        failureCondition: status.failed > 2
+        manifest: |
+          apiVersion: batch/v1
+          kind: Job
+          metadata:
+            generateName: nanochat-sft-
+            namespace: nanochat
+          spec:
+            backoffLimit: 2
+            activeDeadlineSeconds: 7200
+            template:
+              spec:
+                restartPolicy: OnFailure
+                containers:
+                - name: nanochat
+                  image: quay.io/surajd/nanochat:latest
+                  args: ["sft"]
+                  env:
+                  - name: NUM_GPUS
+                    value: "8"
+                  - name: DEVICE_BATCH_SIZE
+                    value: "16"
+                  - name: PYTORCH_CUDA_ALLOC_CONF
+                    value: "expandable_segments:True"
+                  - name: NCCL_IB_DISABLE
+                    value: "0"
+                  resources:
+                    limits:
+                      nvidia.com/gpu: 8
+                      memory: "256Gi"
+                      cpu: "64"
+                    requests:
+                      nvidia.com/gpu: 8
+                      memory: "128Gi"
+                      cpu: "32"
+                  volumeMounts:
+                  - name: nanochat-data1
+                    mountPath: /data/nanochat
+                  - name: dshm
+                    mountPath: /dev/shm
+                volumes:
+                - name: nanochat-data1
+                  persistentVolumeClaim:
+                    claimName: nanochat-data1
+                - name: dshm
+                  emptyDir:
+                    medium: Memory
+                    sizeLimit: "64Gi"
+                nodeSelector:
+                  node.kubernetes.io/instance-type: Standard_ND96isr_H100_v5
+
+    # ------------------------------------------------------------------
+    # Phase 6: Evaluate chat model (ChatCORE)
+    # ------------------------------------------------------------------
+    - name: chat-eval
+      resource:
+        action: create
+        setOwnerReference: true
+        successCondition: status.succeeded > 0
+        failureCondition: status.failed > 2
+        manifest: |
+          apiVersion: batch/v1
+          kind: Job
+          metadata:
+            generateName: nanochat-chat-eval-
+            namespace: nanochat
+          spec:
+            backoffLimit: 2
+            activeDeadlineSeconds: 3600
+            template:
+              spec:
+                restartPolicy: OnFailure
+                containers:
+                - name: nanochat
+                  image: quay.io/surajd/nanochat:latest
+                  args: ["chat-eval"]
+                  env:
+                  - name: NUM_GPUS
+                    value: "8"
+                  - name: PYTORCH_CUDA_ALLOC_CONF
+                    value: "expandable_segments:True"
+                  - name: NCCL_IB_DISABLE
+                    value: "0"
+                  resources:
+                    limits:
+                      nvidia.com/gpu: 8
+                      memory: "256Gi"
+                      cpu: "64"
+                    requests:
+                      nvidia.com/gpu: 8
+                      memory: "128Gi"
+                      cpu: "32"
+                  volumeMounts:
+                  - name: nanochat-data1
+                    mountPath: /data/nanochat
+                  - name: dshm
+                    mountPath: /dev/shm
+                volumes:
+                - name: nanochat-data1
+                  persistentVolumeClaim:
+                    claimName: nanochat-data1
+                - name: dshm
+                  emptyDir:
+                    medium: Memory
+                    sizeLimit: "64Gi"
+                nodeSelector:
+                  node.kubernetes.io/instance-type: Standard_ND96isr_H100_v5
+
+    # ------------------------------------------------------------------
+    # Phase 7: Generate final report
+    # ------------------------------------------------------------------
+    - name: report
+      resource:
+        action: create
+        setOwnerReference: true
+        successCondition: status.succeeded > 0
+        failureCondition: status.failed > 2
+        manifest: |
+          apiVersion: batch/v1
+          kind: Job
+          metadata:
+            generateName: nanochat-report-
+            namespace: nanochat
+          spec:
+            backoffLimit: 2
+            activeDeadlineSeconds: 600
+            template:
+              spec:
+                restartPolicy: OnFailure
+                containers:
+                - name: nanochat
+                  image: quay.io/surajd/nanochat:latest
+                  args: ["report"]
+                  resources:
+                    limits:
+                      memory: "8Gi"
+                      cpu: "4"
+                    requests:
+                      memory: "4Gi"
+                      cpu: "2"
+                  volumeMounts:
+                  - name: nanochat-data1
+                    mountPath: /data/nanochat
+                volumes:
+                - name: nanochat-data1
+                  persistentVolumeClaim:
+                    claimName: nanochat-data1
+                nodeSelector:
+                  node.kubernetes.io/instance-type: Standard_ND96isr_H100_v5

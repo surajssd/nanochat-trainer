@@ -7,7 +7,7 @@ metadata:
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: nanochat-data
+  name: nanochat-data1
   namespace: nanochat
 spec:
   accessModes:
@@ -16,3 +16,36 @@ spec:
   resources:
     requests:
       storage: 256Gi
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: argo-workflow
+  namespace: nanochat
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: argo-workflow
+  namespace: nanochat
+rules:
+- apiGroups: ["batch"]
+  resources: ["jobs"]
+  verbs: ["create", "get", "list", "watch", "delete"]
+- apiGroups: [""]
+  resources: ["pods", "pods/log"]
+  verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: argo-workflow
+  namespace: nanochat
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: argo-workflow
+subjects:
+- kind: ServiceAccount
+  name: argo-workflow
+  namespace: nanochat
