@@ -9,15 +9,16 @@ SCRIPT_NAME="$(basename "$0")"
 MANIFEST_DIR="$(cd "$(dirname "$0")/k8s/single-node" && pwd)"
 NAMESPACE="nanochat"
 
-# Ordered list of phases: name, manifest file, job name, timeout, description
+# Ordered list of phases: name|manifest|resource-name|timeout|description|kind
 PHASES=(
-    "dataset|01-dataset.yaml|nanochat-01-dataset|1h|📦 Download training dataset (~17GB)"
-    "tokenizer|02-tokenizer.yaml|nanochat-02-tokenizer|30m|🔤 Train and evaluate BPE tokenizer"
-    "base-train|03-base-train.yaml|nanochat-03-base-train|4h|🧠 Pretrain base model (auto-resumes)"
-    "base-eval|04-base-eval.yaml|nanochat-04-base-eval|1h|📊 Evaluate base model (CORE/BPB)"
-    "sft|05-sft.yaml|nanochat-05-sft|2h|💬 Supervised fine-tuning"
-    "chat-eval|06-chat-eval.yaml|nanochat-06-chat-eval|1h|🏆 Evaluate chat model (ChatCORE)"
-    "report|07-report.yaml|nanochat-07-report|10m|📝 Generate final report"
+    "dataset|01-dataset.yaml|nanochat-01-dataset|1h|📦 Download training dataset (~17GB)|job"
+    "tokenizer|02-tokenizer.yaml|nanochat-02-tokenizer|30m|🔤 Train and evaluate BPE tokenizer|job"
+    "base-train|03-base-train.yaml|nanochat-03-base-train|4h|🧠 Pretrain base model (auto-resumes)|job"
+    "base-eval|04-base-eval.yaml|nanochat-04-base-eval|1h|📊 Evaluate base model (CORE/BPB)|job"
+    "sft|05-sft.yaml|nanochat-05-sft|2h|💬 Supervised fine-tuning|job"
+    "chat-eval|06-chat-eval.yaml|nanochat-06-chat-eval|1h|🏆 Evaluate chat model (ChatCORE)|job"
+    "report|07-report.yaml|nanochat-07-report|10m|📝 Generate final report|job"
+    "chat-serve|08-chat-serve.yaml|nanochat-08-chat-serve|5m|🌐 Serve chat web UI|deployment"
 )
 
 # ---------------------------------------------------------------------------
@@ -56,7 +57,7 @@ complete before starting the next. Data is persisted on a shared PVC so phases
 ${BOLD}Phases:${RESET}
 EOF
     for entry in "${PHASES[@]}"; do
-        IFS='|' read -r name _ _ timeout desc <<<"$entry"
+        IFS='|' read -r name _ _ timeout desc _ <<<"$entry"
         printf "  ${CYAN}%-12s${RESET} %s ${YELLOW}(timeout: %s)${RESET}\n" "$name" "$desc" "$timeout"
     done
     cat <<EOF
@@ -116,6 +117,29 @@ wait_for_job() {
         trap - RETURN
     else
         kubectl wait --for=condition=complete "job/${job_name}" \
+            -n "${NAMESPACE}" --timeout="${timeout}"
+    fi
+}
+
+# Wait for a Deployment to become Available.
+wait_for_deployment() {
+    local deploy_name="$1" timeout="$2"
+
+    if [ "$TAIL_LOGS" = true ]; then
+        (
+            sleep 5
+            kubectl logs -n "${NAMESPACE}" "deployment/${deploy_name}" -f --all-containers 2>/dev/null || true
+        ) &
+        local log_pid=$!
+        trap 'kill $log_pid 2>/dev/null || true' RETURN
+
+        kubectl wait --for=condition=Available "deployment/${deploy_name}" \
+            -n "${NAMESPACE}" --timeout="${timeout}"
+
+        kill "$log_pid" 2>/dev/null || true
+        trap - RETURN
+    else
+        kubectl wait --for=condition=Available "deployment/${deploy_name}" \
             -n "${NAMESPACE}" --timeout="${timeout}"
     fi
 }
@@ -182,7 +206,7 @@ done
 echo ""
 log "📋 Pipeline plan:"
 for i in "${!PHASES[@]}"; do
-    IFS='|' read -r name _ job_name timeout desc <<<"${PHASES[$i]}"
+    IFS='|' read -r name _ job_name timeout desc _ <<<"${PHASES[$i]}"
     if [ "$i" -lt "$START_INDEX" ] || [ "$i" -gt "$END_INDEX" ]; then
         info "  ⏭️  skip   ${name}"
     else
@@ -206,7 +230,8 @@ for i in "${!PHASES[@]}"; do
         continue
     fi
 
-    IFS='|' read -r name manifest job_name timeout desc <<<"${PHASES[$i]}"
+    IFS='|' read -r name manifest job_name timeout desc kind <<<"${PHASES[$i]}"
+    kind="${kind:-job}"
 
     log "Phase: ${name} — ${desc}"
     info "Manifest: ${manifest}"
@@ -214,14 +239,32 @@ for i in "${!PHASES[@]}"; do
 
     kubectl apply -f "${MANIFEST_DIR}/${manifest}"
 
-    if ! wait_for_job "$job_name" "$timeout"; then
-        err "${job_name} did not complete within ${timeout}"
-        info "Check logs:   kubectl logs -n ${NAMESPACE} job/${job_name}"
-        info "Describe job: kubectl describe job -n ${NAMESPACE} ${job_name}"
-        exit 1
-    fi
+    if [ "$kind" = "deployment" ]; then
+        if ! wait_for_deployment "$job_name" "$timeout"; then
+            err "${job_name} deployment did not become available within ${timeout}"
+            info "Check logs:        kubectl logs -n ${NAMESPACE} deployment/${job_name}"
+            info "Describe deployment: kubectl describe deployment -n ${NAMESPACE} ${job_name}"
+            exit 1
+        fi
 
-    ok "${name} completed"
+        ok "${name} is running"
+        echo ""
+        info "${BOLD}🌐 Chat web UI is ready!${RESET}"
+        info "Run the following to access it from your machine:"
+        echo ""
+        info "  kubectl port-forward -n ${NAMESPACE} deployment/${job_name} 8000:8000"
+        echo ""
+        info "Then open ${CYAN}http://localhost:8000${RESET} in your browser."
+    else
+        if ! wait_for_job "$job_name" "$timeout"; then
+            err "${job_name} did not complete within ${timeout}"
+            info "Check logs:   kubectl logs -n ${NAMESPACE} job/${job_name}"
+            info "Describe job: kubectl describe job -n ${NAMESPACE} ${job_name}"
+            exit 1
+        fi
+
+        ok "${name} completed"
+    fi
     echo ""
 done
 

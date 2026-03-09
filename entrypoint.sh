@@ -6,7 +6,8 @@ set -euo pipefail
 #
 # Usage:  entrypoint.sh <phase> [extra-args...]
 #
-# Phases: dataset, tokenizer, base-train, base-eval, sft, chat-eval, report
+# Phases: dataset, tokenizer, base-train, base-eval, sft, chat-eval, report,
+#         chat-serve
 #
 # All configuration is via environment variables (see defaults below).
 # Extra arguments after the phase name are forwarded to the upstream script.
@@ -21,6 +22,7 @@ DATASET_SHARDS="${DATASET_SHARDS:-170}"
 TARGET_PARAM_DATA_RATIO="${TARGET_PARAM_DATA_RATIO:-9.5}"
 WANDB_RUN="${WANDB_RUN:-dummy}"
 NANOCHAT_BASE_DIR="${NANOCHAT_BASE_DIR:-/data/nanochat}"
+CHAT_NUM_GPUS="${CHAT_NUM_GPUS:-1}"
 
 IDENTITY_URL="https://karpathy-public.s3.us-west-2.amazonaws.com/identity_conversations.jsonl"
 
@@ -138,12 +140,17 @@ phase_report() {
     python -m nanochat.report generate "$@"
 }
 
+phase_chat_serve() {
+    log "Starting chat web UI (GPUs=${CHAT_NUM_GPUS})..."
+    python -m scripts.chat_web --num-gpus "${CHAT_NUM_GPUS}" "$@"
+}
+
 # ---------------------------------------------------------------------------
 # Main dispatch
 # ---------------------------------------------------------------------------
 if [ $# -lt 1 ]; then
     echo "Usage: $0 <phase> [extra-args...]"
-    echo "Phases: dataset, tokenizer, base-train, base-eval, sft, chat-eval, report"
+    echo "Phases: dataset, tokenizer, base-train, base-eval, sft, chat-eval, report, chat-serve"
     exit 1
 fi
 
@@ -158,9 +165,10 @@ base-eval) phase_base_eval "$@" ;;
 sft) phase_sft "$@" ;;
 chat-eval) phase_chat_eval "$@" ;;
 report) phase_report "$@" ;;
+chat-serve) phase_chat_serve "$@" ;;
 *)
     echo "Error: unknown phase '${PHASE}'"
-    echo "Phases: dataset, tokenizer, base-train, base-eval, sft, chat-eval, report"
+    echo "Phases: dataset, tokenizer, base-train, base-eval, sft, chat-eval, report, chat-serve"
     exit 1
     ;;
 esac

@@ -1,0 +1,67 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nanochat-08-chat-serve
+  namespace: nanochat
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nanochat-chat-serve
+  template:
+    metadata:
+      labels:
+        app: nanochat-chat-serve
+    spec:
+      containers:
+      - name: nanochat
+        image: quay.io/surajd/nanochat:latest
+        args: ["chat-serve"]
+        env:
+        - name: CHAT_NUM_GPUS
+          value: "1"
+        - name: PYTORCH_CUDA_ALLOC_CONF
+          value: "expandable_segments:True"
+        - name: NCCL_IB_DISABLE
+          value: "0"
+        ports:
+        - containerPort: 8000
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          failureThreshold: 6
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 60
+          periodSeconds: 15
+          failureThreshold: 4
+        resources:
+          limits:
+            nvidia.com/gpu: 1
+            memory: "64Gi"
+            cpu: "16"
+          requests:
+            nvidia.com/gpu: 1
+            memory: "32Gi"
+            cpu: "8"
+        volumeMounts:
+        - name: nanochat-data
+          mountPath: /data/nanochat
+        - name: dshm
+          mountPath: /dev/shm
+      volumes:
+      - name: nanochat-data
+        persistentVolumeClaim:
+          claimName: nanochat-data
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: "64Gi"
+      nodeSelector:
+        node.kubernetes.io/instance-type: Standard_ND96isr_H100_v5
