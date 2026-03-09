@@ -11,13 +11,13 @@ NAMESPACE="nanochat"
 
 # Ordered list of phases: name, manifest file, job name, timeout, description
 PHASES=(
-    "dataset|01-dataset.yaml|nanochat-01-dataset|1h|Download training dataset (~17GB)"
-    "tokenizer|02-tokenizer.yaml|nanochat-02-tokenizer|30m|Train and evaluate BPE tokenizer"
-    "base-train|03-base-train.yaml|nanochat-03-base-train|4h|Pretrain base model (auto-resumes)"
-    "base-eval|04-base-eval.yaml|nanochat-04-base-eval|1h|Evaluate base model (CORE/BPB)"
-    "sft|05-sft.yaml|nanochat-05-sft|2h|Supervised fine-tuning"
-    "chat-eval|06-chat-eval.yaml|nanochat-06-chat-eval|1h|Evaluate chat model (ChatCORE)"
-    "report|07-report.yaml|nanochat-07-report|10m|Generate final report"
+    "dataset|01-dataset.yaml|nanochat-01-dataset|1h|📦 Download training dataset (~17GB)"
+    "tokenizer|02-tokenizer.yaml|nanochat-02-tokenizer|30m|🔤 Train and evaluate BPE tokenizer"
+    "base-train|03-base-train.yaml|nanochat-03-base-train|4h|🧠 Pretrain base model (auto-resumes)"
+    "base-eval|04-base-eval.yaml|nanochat-04-base-eval|1h|📊 Evaluate base model (CORE/BPB)"
+    "sft|05-sft.yaml|nanochat-05-sft|2h|💬 Supervised fine-tuning"
+    "chat-eval|06-chat-eval.yaml|nanochat-06-chat-eval|1h|🏆 Evaluate chat model (ChatCORE)"
+    "report|07-report.yaml|nanochat-07-report|10m|📝 Generate final report"
 )
 
 # ---------------------------------------------------------------------------
@@ -36,11 +36,11 @@ else
     BOLD="" GREEN="" YELLOW="" RED="" CYAN="" RESET=""
 fi
 
-log() { echo "${BOLD}==>${RESET} [$(date -u '+%Y-%m-%dT%H:%M:%SZ')] $*"; }
+log() { echo "🚀 ${BOLD}==>${RESET} [$(date -u '+%Y-%m-%dT%H:%M:%SZ')] $*"; }
 info() { echo "    ${CYAN}$*${RESET}"; }
-ok() { echo "    ${GREEN}✔ $*${RESET}"; }
-warn() { echo "    ${YELLOW}⚠ $*${RESET}"; }
-err() { echo "    ${RED}✘ $*${RESET}" >&2; }
+ok() { echo "    ${GREEN}✅ $*${RESET}"; }
+warn() { echo "    ${YELLOW}⚠️  $*${RESET}"; }
+err() { echo "    ${RED}❌ $*${RESET}" >&2; }
 
 # Extract the phase name from a PHASES entry
 phase_name() { echo "$1" | cut -d'|' -f1; }
@@ -180,24 +180,24 @@ done
 
 # Print plan
 echo ""
-log "Pipeline plan:"
+log "📋 Pipeline plan:"
 for i in "${!PHASES[@]}"; do
     IFS='|' read -r name _ job_name timeout desc <<<"${PHASES[$i]}"
     if [ "$i" -lt "$START_INDEX" ] || [ "$i" -gt "$END_INDEX" ]; then
-        info "  skip   ${name}"
+        info "  ⏭️  skip   ${name}"
     else
-        info "  run    ${name}  →  ${desc}  (timeout: ${timeout})"
+        info "  ▶️  run    ${name}  →  ${desc}  (timeout: ${timeout})"
     fi
 done
 echo ""
 
 if [ "$DRY_RUN" = true ]; then
-    log "Dry-run mode — no changes applied"
+    log "🔍 Dry-run mode — no changes applied"
     exit 0
 fi
 
 # Ensure namespace and PVC exist
-log "Applying namespace and PVC..."
+log "💾 Applying namespace and PVC..."
 kubectl apply -f "${MANIFEST_DIR}/pvc.yaml"
 echo ""
 
@@ -225,4 +225,4 @@ for i in "${!PHASES[@]}"; do
     echo ""
 done
 
-log "${GREEN}All phases completed successfully!${RESET}"
+log "${GREEN}🎉 All phases completed successfully!${RESET}"
